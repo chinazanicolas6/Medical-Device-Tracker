@@ -41,12 +41,19 @@
 (define-constant ERR-DEVICE-ALREADY-RECALLED (err u7))
 (define-constant ERR-INVALID-RECALL-SEVERITY (err u8))
 (define-constant ERR-RECALL-NOT-FOUND (err u9))
+(define-constant ERR-INVALID-BATCH-ID (err u10))
+(define-constant ERR-INVALID-BATCH-COUNT (err u11))
+(define-constant ERR-INVALID-REASON-LENGTH (err u12))
 
 ;; Validation constants
 (define-constant min-device-id u1)
 (define-constant max-device-id u1000000)
 (define-constant max-history-entries u10)
 (define-constant max-recall-reason-length u256)
+(define-constant min-recall-reason-length u10)
+(define-constant max-batch-id u1000000)
+(define-constant max-affected-batches u10000)
+(define-constant max-devices-per-batch u100000)
 
 ;; Administrative state variables
 (define-data-var admin-principal principal tx-sender)
@@ -151,6 +158,32 @@
 ;; Ensures device identifier is within acceptable range
 (define-private (validate-device-identifier (device-id uint))
   (and (>= device-id min-device-id) (<= device-id max-device-id))
+)
+
+;; Validates batch identifier is within acceptable range
+(define-private (validate-batch-identifier (batch-id uint))
+  (and (>= batch-id u1) (<= batch-id max-batch-id))
+)
+
+;; Validates affected batch count is within acceptable range
+(define-private (validate-affected-batches (batch-count uint))
+  (and (>= batch-count u0) (<= batch-count max-affected-batches))
+)
+
+;; Validates devices affected count is within acceptable range
+(define-private (validate-devices-affected (device-count uint))
+  (and (> device-count u0) (<= device-count max-devices-per-batch))
+)
+
+;; Validates recall reason string length
+(define-private (validate-recall-reason (reason (string-ascii 256)))
+  (let
+    ((reason-length (len reason)))
+    (and 
+      (>= reason-length min-recall-reason-length)
+      (<= reason-length max-recall-reason-length)
+    )
+  )
 )
 
 ;; Determines if a principal is an approved regulatory authority for a certification type
@@ -324,9 +357,13 @@
       (recall-timestamp (generate-next-timestamp))
       (new-history-entry {status: lifecycle-recalled, timestamp: recall-timestamp})
       (updated-history (unwrap-panic (as-max-len? (append (get lifecycle-history device-record) new-history-entry) u10)))
+      (validated-reason reason)
+      (validated-batches affected-batches)
     )
     (asserts! (validate-device-identifier device-id) ERR-DEVICE-NOT-FOUND)
     (asserts! (validate-recall-severity severity) ERR-INVALID-RECALL-SEVERITY)
+    (asserts! (validate-recall-reason validated-reason) ERR-INVALID-REASON-LENGTH)
+    (asserts! (validate-affected-batches validated-batches) ERR-INVALID-BATCH-COUNT)
     (asserts! (check-admin-privileges tx-sender) ERR-UNAUTHORIZED-ACCESS)
     (asserts! (not (get is-recalled device-record)) ERR-DEVICE-ALREADY-RECALLED)
     
@@ -336,9 +373,9 @@
         recall-issuer: tx-sender,
         recall-timestamp: recall-timestamp,
         severity-level: severity,
-        reason-description: reason,
+        reason-description: validated-reason,
         is-active: true,
-        affected-batch-count: affected-batches
+        affected-batch-count: validated-batches
       }
     )
     
@@ -388,23 +425,30 @@
   (severity uint)
   (reason (string-ascii 256))
   (devices-affected uint))
-  (begin
+  (let
+    (
+      (validated-batch-id batch-id)
+      (validated-reason reason)
+      (validated-devices devices-affected)
+    )
     (asserts! (check-admin-privileges tx-sender) ERR-UNAUTHORIZED-ACCESS)
     (asserts! (validate-recall-severity severity) ERR-INVALID-RECALL-SEVERITY)
-    (asserts! (> devices-affected u0) ERR-INVALID-RECALL-SEVERITY)
+    (asserts! (validate-batch-identifier validated-batch-id) ERR-INVALID-BATCH-ID)
+    (asserts! (validate-recall-reason validated-reason) ERR-INVALID-REASON-LENGTH)
+    (asserts! (validate-devices-affected validated-devices) ERR-INVALID-BATCH-COUNT)
     
     (map-set batch-recalls
-      {batch-id: batch-id}
+      {batch-id: validated-batch-id}
       {
         issuer: tx-sender,
         recall-timestamp: (generate-next-timestamp),
         severity-level: severity,
-        total-devices-affected: devices-affected,
-        reason-description: reason
+        total-devices-affected: validated-devices,
+        reason-description: validated-reason
       }
     )
     
-    (var-set total-recalls-issued (+ (var-get total-recalls-issued) devices-affected))
+    (var-set total-recalls-issued (+ (var-get total-recalls-issued) validated-devices))
     (ok true)
   )
 )
